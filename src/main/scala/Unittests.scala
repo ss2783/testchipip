@@ -167,9 +167,71 @@ class StreamWidthAdapterTest extends UnitTest {
     "StreamWidthAdapterTest: Data, keep, or last does not match")
 }
 
+class InOrderDistributorTest extends UnitTest {
+  val dist = Module(new InOrderDistributor(2, UInt(1.W), UInt(1.W)))
+
+  class DelayedResponder(delay: Int) extends Module {
+    val io = IO(new Bundle {
+      val in = Flipped(Decoupled(UInt(1.W)))
+      val out = Decoupled(UInt(1.W))
+    })
+
+    val value = Reg(UInt(1.W))
+    val s_idle :: s_delay :: s_resp :: Nil = Enum(3)
+    val state = RegInit(s_idle)
+
+    val (delayCount, delayDone) = Counter(state === s_delay, delay)
+
+    when (io.in.fire()) {
+      value := io.in.bits
+      state := s_delay
+    }
+    when (delayDone) { state := s_resp }
+    when (io.out.fire()) { state := s_idle }
+
+    io.in.ready := state === s_idle
+    io.out.valid := state === s_resp
+    io.out.bits := value
+  }
+
+  def DelayedResponder(in: DecoupledIO[UInt], delay: Int) = {
+    val responder = Module(new DelayedResponder(delay))
+    responder.io.in <> in
+    responder.io.out
+  }
+
+  dist.io.out_responses(0) <> DelayedResponder(dist.io.out_requests(0), 8)
+  dist.io.out_responses(1) <> DelayedResponder(dist.io.out_requests(1), 5)
+
+  val s_start :: s_send :: s_wait :: s_recv :: s_done :: Nil = Enum(5)
+  val state = RegInit(s_start)
+
+  val (sendCount, sendDone) = Counter(dist.io.in_request.fire(), 2)
+  val (recvCount, recvDone) = Counter(dist.io.in_response.fire(), 2)
+  val (waitCount, waitDone) = Counter(state === s_wait, 10)
+
+  dist.io.in_request.valid := state === s_send
+  dist.io.in_request.bits := sendCount
+  dist.io.in_response.ready := state === s_recv
+
+  when (state === s_start && io.start) {
+    state := s_send
+  }
+
+  when (sendDone) { state := s_wait }
+  when (waitDone) { state := s_recv }
+  when (recvDone) { state := s_done }
+
+  io.finished := state === s_done
+
+  assert(!dist.io.in_response.valid || dist.io.in_response.bits === recvCount,
+    "InOrderDistributorTest: got data out of order")
+}
+
 object TestChipUnitTests {
   def apply(implicit p: Parameters): Seq[UnitTest] =
     Seq(
       Module(new BlockDeviceTrackerTestWrapper),
-      Module(new StreamWidthAdapterTest))
+      Module(new StreamWidthAdapterTest),
+      Module(new InOrderDistributorTest))
 }
